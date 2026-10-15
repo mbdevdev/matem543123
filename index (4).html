@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bouncy Balls</title>
+<style>
+  :root {
+    --bg: #fff4e0;
+    --ink: #1d1b3a;
+    --panel: #ffffff;
+    --accent: #3b3bff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14122b;
+      --ink: #fff4e0;
+      --panel: #1f1c42;
+      --accent: #ffd23f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    touch-action: none;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(1.4rem, 4vw, 2.2rem);
+    font-weight: 900;
+    letter-spacing: -0.02em;
+  }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button {
+    font: inherit;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--ink);
+    border: 0;
+    border-radius: 999px;
+    padding: 9px 16px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent); color: #fff; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  label { display: flex; align-items: center; gap: 6px; font-size: .9rem; font-weight: 700; }
+  input[type=range] { accent-color: var(--accent); width: 110px; }
+  #count { min-width: 2ch; text-align: right; }
+  .meter { width: 70px; height: 10px; border-radius: 999px; background: var(--panel); overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--accent); }
+  main { flex: 1; min-height: 0; padding: 0 16px 16px; position: relative; }
+  dialog { width: min(560px, 92vw); max-height: 90vh; overflow: auto; touch-action: pan-y; border: 0; border-radius: 20px; padding: 18px; background: var(--panel); color: var(--ink); }
+  dialog::backdrop { background: rgba(0,0,0,.5); }
+  .adm { display: grid; gap: 10px; }
+  .adm h2 { margin: 0; font-size: 1.1rem; }
+  .adm label { display: grid; gap: 4px; }
+  .adm input[type=text], .adm input[type=password] { font: inherit; padding: 9px 12px; border-radius: 12px; border: 2px solid var(--ink); background: transparent; color: inherit; }
+  .adm button { justify-self: start; }
+  .adm ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .adm li { display: flex; justify-content: space-between; align-items: center; gap: 8px; word-break: break-all; }
+  .adm small { opacity: .75; line-height: 1.4; }
+  #log { min-height: 1.4em; font-weight: 700; }
+  .pop {
+    position: absolute; top: 8px; max-height: 45%; object-fit: cover;
+    border-radius: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    pointer-events: none; animation: pop .35s cubic-bezier(.2,1.6,.4,1);
+  }
+  @keyframes pop { from { transform: scale(.2); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .pop { animation: none; } }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: var(--panel);
+    border-radius: 24px;
+    cursor: crosshair;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bouncy Balls</h1>
+  <div class="controls">
+    <button id="add">Добавить шар</button>
+    <button id="shake">Встряхнуть</button>
+    <button id="clear">Очистить</button>
+    <button id="adminOpen">Админка</button>
+    <button id="mic">Включить микрофон</button>
+    <label>Чувствительность <input id="sens" type="range" min="1" max="20" step="1" value="8"></label>
+    <div class="meter" title="Громкость"><i id="level"></i></div>
+    <label>Гравитация <input id="grav" type="range" min="0" max="2" step="0.1" value="1"></label>
+    <label>Шаров: <span id="count">0</span></label>
+  </div>
+</header>
+<main><canvas id="c" aria-label="Площадка с прыгающими шарами"></canvas></main>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const countEl = document.getElementById('count');
+const gravEl = document.getElementById('grav');
+const COLORS = ['#ff4d6d', '#ffb703', '#06d6a0', '#3b3bff', '#ff7ac6', '#00b4d8'];
+const BOUNCE = 0.82, FRICTION = 0.999, MAX_BALLS = 150;
+let power = 0, level = 0, micOn = false, analyser, micData, micStream, audioCtx;
+let W = 0, H = 0, balls = [], mouse = null, last = performance.now();
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  W = r.width; H = r.height;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+
+function addBall(x, y) {
+  if (balls.length >= MAX_BALLS) balls.shift();
+  const r = 14 + Math.random() * 26;
+  balls.push({
+    x: x ?? r + Math.random() * (W - 2 * r),
+    y: y ?? r + Math.random() * (H / 3),
+    vx: (Math.random() - 0.5) * 500,
+    vy: (Math.random() - 0.5) * 300,
+    r, m: r * r,
+    color: COLORS[Math.floor(Math.random() * COLORS.length)]
+  });
+  countEl.textContent = balls.length;
+}
+
+function step(dt) {
+  const g = 1400 * parseFloat(gravEl.value);
+  for (const b of balls) {
+    b.vy += g * dt;
+    if (power > 0) {
+      const kick = power * 6000 * dt * (20 / b.r);
+      b.vy -= kick;
+      b.vx += (Math.random() - 0.5) * kick * 0.8;
+    }
+    b.vx *= FRICTION;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    if (b.x < b.r) { b.x = b.r; b.vx = -b.vx * BOUNCE; }
+    if (b.x > W - b.r) { b.x = W - b.r; b.vx = -b.vx * BOUNCE; }
+    if (b.y + b.r < 0) {
+      if (!b.out) { b.out = true; popup(b.x); }
+      if (b.y < -H) { b.y = b.r; b.vy = 0; b.out = false; }
+    } else b.out = false;
+    if (b.y > H - b.r) {
+      b.y = H - b.r;
+      b.vy = -b.vy * BOUNCE;
+      if (Math.abs(b.vy) < 20) b.vy = 0;
+    }
+    if (mouse) {
+      const dx = b.x - mouse.x, dy = b.y - mouse.y, d = Math.hypot(dx, dy) || 1;
+      if (d < 120) { const f = (120 - d) * 12; b.vx += dx / d * f * dt * 10; b.vy += dy / d * f * dt * 10; }
+    }
+  }
+  for (let i = 0; i < balls.length; i++) {
+    for (let j = i + 1; j < balls.length; j++) {
+      const a = balls[i], b = balls[j];
+      const dx = b.x - a.x, dy = b.y - a.y, dist = Math.hypot(dx, dy), min = a.r + b.r;
+      if (dist === 0 || dist >= min) continue;
+      const nx = dx / dist, ny = dy / dist, overlap = min - dist;
+      const tot = a.m + b.m;
+      a.x -= nx * overlap * (b.m / tot); a.y -= ny * overlap * (b.m / tot);
+      b.x += nx * overlap * (a.m / tot); b.y += ny * overlap * (a.m / tot);
+      const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+      if (rv > 0) continue;
+      const imp = -(1 + BOUNCE) * rv / (1 / a.m + 1 / b.m);
+      a.vx -= imp * nx / a.m; a.vy -= imp * ny / a.m;
+      b.vx += imp * nx / b.m; b.vy += imp * ny / b.m;
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (const b of balls) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fillStyle = b.color;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,.45)';
+    ctx.fill();
+  }
+}
+
+function loop(t) {
+  const dt = Math.min((t - last) / 1000, 0.03);
+  last = t;
+  updateSound();
+  // 2 подшага для стабильности столкновений
+  step(dt / 2); step(dt / 2);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+canvas.addEventListener('pointerdown', e => { const p = pos(e); addBall(p.x, p.y); mouse = p; });
+canvas.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' || e.buttons) mouse = pos(e); });
+canvas.addEventListener('pointerup', () => mouse = null);
+canvas.addEventListener('pointerleave', () => mouse = null);
+
+document.getElementById('add').onclick = () => addBall();
+document.getElementById('clear').onclick = () => { balls = []; countEl.textContent = 0; };
+document.getElementById('shake').onclick = () => {
+  for (const b of balls) { b.vx += (Math.random() - 0.5) * 1600; b.vy -= 300 + Math.random() * 900; }
+};
+
+const stage = document.querySelector('main');
+let media = [], active = 0, lastPop = 0, sound = null, lastSound = 0, loudVideo = false;
+fetch('media.json?' + Date.now()).then(r => r.ok ? r.json() : { items: [] })
+  .then(j => media = j.items || []).catch(() => {});
+
+const isPlaying = a => a && !a.paused && !a.ended;
+function playSound(list) {
+  const now = performance.now();
+  if (now - lastSound < 2500 || isPlaying(sound)) return;
+  lastSound = now;
+  sound = new Audio(list[Math.floor(Math.random() * list.length)].file);
+  sound.play().catch(() => {});
+}
+
+function popup(x) {
+  const now = performance.now();
+  if (!media.length || active >= 4 || now - lastPop < 250) return;
+  lastPop = now;
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+  const sounds = media.filter(x => x.type === 'audio');
+  const visuals = media.filter(x => x.type !== 'audio');
+  const m = visuals.length ? pick(visuals) : null;
+  if (sounds.length && (!m || m.type !== 'video')) playSound(sounds);
+  if (!m) return;
+  active++;
+  const el = document.createElement(m.type === 'video' ? 'video' : 'img');
+  el.src = m.file; el.className = 'pop';
+  const size = Math.min(260, W * 0.5);
+  el.style.width = size + 'px';
+  el.style.left = 16 + Math.max(0, Math.min(W - size, x - size / 2)) + 'px';
+  stage.appendChild(el);
+  let done = false, loud = false;
+  const end = () => { if (done) return; done = true; if (loud) loudVideo = false; el.remove(); active--; };
+  el.onerror = end;
+  if (m.type === 'video') {
+    el.playsInline = true;
+    if (!loudVideo && !isPlaying(sound)) { loud = true; loudVideo = true; } else el.muted = true;
+    el.play().catch(() => { el.muted = true; el.play().catch(() => {}); });
+    el.onended = end;
+    setTimeout(end, 6000);
+  } else setTimeout(end, 2500);
+}
+
+function updateSound() {
+  if (!micOn) { power = 0; return; }
+  analyser.getByteTimeDomainData(micData);
+  let sum = 0;
+  for (let i = 0; i < micData.length; i++) { const v = (micData[i] - 128) / 128; sum += v * v; }
+  const rms = Math.sqrt(sum / micData.length);
+  level = level * 0.7 + rms * 0.3;
+  const sens = parseFloat(document.getElementById('sens').value);
+  power = Math.max(0, level * sens - 0.15);
+  document.getElementById('level').style.width = Math.min(100, level * sens * 100) + '%';
+}
+
+const micBtn = document.getElementById('mic');
+micBtn.onclick = async () => {
+  if (micOn) {
+    micOn = false;
+    micStream.getTracks().forEach(t => t.stop());
+    audioCtx.close();
+    document.getElementById('level').style.width = '0';
+    micBtn.textContent = 'Включить микрофон';
+    return;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    micData = new Uint8Array(analyser.fftSize);
+    src.connect(analyser);
+    micOn = true;
+    micBtn.textContent = 'Выключить микрофон';
+  } catch (err) {
+    alert('Нет доступа к микрофону. Разреши его в настройках браузера (нужен https).');
+  }
+};
+
+resize();
+for (let i = 0; i < 12; i++) addBall();
+requestAnimationFrame(loop);
+</script>
+<dialog id="adm">
+  <div class="adm">
+    <h2>Админка: фото, видео и звуки</h2>
+    <label>Токен GitHub <input type="password" id="token" autocomplete="off"></label>
+    <label>Репозиторий <input type="text" id="repo" value="mbdevdev/matem543123"></label>
+    <label>Ветка <input type="text" id="branch" value="main"></label>
+    <button id="save">Запомнить в этом браузере</button>
+    <small>Токен: GitHub → Settings → Developer settings → Fine-grained tokens, доступ только к этому репозиторию, Contents: Read and write. Без токена ничего изменить нельзя.</small>
+    <input type="file" id="files" multiple accept="image/*,video/*,audio/*">
+    <button id="up">Загрузить на сайт</button>
+    <small>Файлы лучше до 25 МБ. Сайт обновится примерно через минуту.</small>
+    <ul id="list"></ul>
+    <button id="refresh">Обновить список</button>
+    <div id="log" role="status"></div>
+    <button id="admClose">Закрыть</button>
+  </div>
+</dialog>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const log = t => $('log').textContent = t;
+  const cfg = () => ({ token: $('token').value.trim(), repo: $('repo').value.trim(), branch: $('branch').value.trim() || 'main' });
+  const ICON = { image: 'Фото', video: 'Видео', audio: 'Звук' };
+
+  try {
+    const s = JSON.parse(localStorage.getItem('bb-admin') || '{}');
+    if (s.token) $('token').value = s.token;
+    if (s.repo) $('repo').value = s.repo;
+    if (s.branch) $('branch').value = s.branch;
+  } catch (e) {}
+
+  $('adminOpen').onclick = () => { $('adm').showModal(); if ($('token').value) refresh(); };
+  $('admClose').onclick = () => $('adm').close();
+  $('save').onclick = () => {
+    try { localStorage.setItem('bb-admin', JSON.stringify(cfg())); log('Сохранено в этом браузере.'); }
+    catch (e) { log('Не удалось сохранить.'); }
+  };
+
+  async function gh(path, method = 'GET', body) {
+    const c = cfg();
+    if (!c.token) throw new Error('Вставь токен GitHub.');
+    const url = `https://api.github.com/repos/${c.repo}/contents/${path}` + (method === 'GET' ? `?ref=${c.branch}&t=${Date.now()}` : '');
+    const r = await fetch(url, {
+      method,
+      headers: { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github+json' },
+      body: body && JSON.stringify({ ...body, branch: c.branch })
+    });
+    if (r.status === 404 && method === 'GET') return null;
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).message || ('Ошибка ' + r.status));
+    return r.json();
+  }
+
+  async function loadList() {
+    const f = await gh('media.json');
+    if (!f) return { items: [], sha: undefined };
+    return { items: JSON.parse(atob(f.content.replace(/\n/g, ''))).items || [], sha: f.sha };
+  }
+  const saveList = (items, sha) =>
+    gh('media.json', 'PUT', { message: 'Update media list', content: btoa(JSON.stringify({ items }, null, 1)), sha });
+  const toB64 = f => new Promise((ok, no) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result.split(',')[1]);
+    r.onerror = no;
+    r.readAsDataURL(f);
+  });
+
+  function render(items) {
+    const ul = $('list');
+    ul.innerHTML = '';
+    if (!items.length) { ul.innerHTML = '<li>Пока пусто. Загрузи первый файл.</li>'; return; }
+    items.forEach((it, i) => {
+      const li = document.createElement('li');
+      const span = document.createElement('span');
+      span.textContent = `${ICON[it.type] || it.type}: ${it.file.replace('media/', '')}`;
+      const b = document.createElement('button');
+      b.textContent = 'Удалить';
+      b.onclick = () => del(i, b);
+      li.append(span, b);
+      ul.appendChild(li);
+    });
+  }
+
+  async function refresh() {
+    try { log('Загружаю список…'); render((await loadList()).items); log(''); }
+    catch (e) { log(e.message); }
+  }
+  $('refresh').onclick = refresh;
+
+  async function del(i, btn) {
+    btn.disabled = true;
+    try {
+      const { items, sha } = await loadList();
+      const it = items[i];
+      if (!it) return;
+      const f = await gh(it.file);
+      items.splice(i, 1);
+      await saveList(items, sha);
+      if (f) await gh(it.file, 'DELETE', { message: 'Remove ' + it.file, sha: f.sha });
+      render(items);
+      log('Удалено. Сайт обновится примерно через минуту.');
+    } catch (e) { log(e.message); btn.disabled = false; }
+  }
+
+  $('up').onclick = async () => {
+    const files = [...$('files').files];
+    if (!files.length) return log('Сначала выбери файлы.');
+    $('up').disabled = true;
+    try {
+      const { items, sha } = await loadList();
+      let added = 0;
+      for (const f of files) {
+        const type = f.type.startsWith('image') ? 'image' : f.type.startsWith('video') ? 'video' : f.type.startsWith('audio') ? 'audio' : null;
+        if (!type) { log('Пропущен: ' + f.name); continue; }
+        log('Загружаю ' + f.name + '…');
+        const path = 'media/' + Date.now() + '-' + f.name.replace(/[^a-z0-9._-]/gi, '_');
+        await gh(path, 'PUT', { message: 'Add ' + f.name, content: await toB64(f) });
+        items.push({ type, file: path });
+        added++;
+      }
+      if (added) await saveList(items, sha);
+      render(items);
+      $('files').value = '';
+      log(added ? 'Готово. Сайт обновится примерно через минуту.' : 'Нечего загружать.');
+    } catch (e) { log(e.message); }
+    $('up').disabled = false;
+  };
+})();
+</script>
+</body>
+</html>
